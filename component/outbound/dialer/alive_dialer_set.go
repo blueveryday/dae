@@ -87,7 +87,9 @@ func NewAliveDialerSet(
 		a.dialerToIndex[d] = -Init
 	}
 	for _, d := range dialers {
-		a.NotifyLatencyChange(d, setAlive)
+		coll, put := d.mustGetCollection(a.CheckTyp)
+		a.NotifyLatencyChange(d, coll)
+		put()
 	}
 	return a
 }
@@ -156,7 +158,7 @@ func (a *AliveDialerSet) latencyString(d *Dialer, afterLatency time.Duration) st
 }
 
 // NotifyLatencyChange should be invoked when dialer every time latency and alive state changes.
-func (a *AliveDialerSet) NotifyLatencyChange(dialer *Dialer, alive bool) {
+func (a *AliveDialerSet) NotifyLatencyChange(dialer *Dialer, coll *collection) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	var (
@@ -165,16 +167,15 @@ func (a *AliveDialerSet) NotifyLatencyChange(dialer *Dialer, alive bool) {
 		hasLatency bool
 		minPolicy  bool
 	)
-
 	switch a.selectionPolicy {
 	case consts.DialerSelectionPolicy_MinLastLatency:
-		rawLatency, hasLatency = dialer.mustGetCollection(a.CheckTyp).Latencies10.LastLatency()
+		rawLatency, hasLatency = coll.Latencies10.LastLatency()
 		minPolicy = true
 	case consts.DialerSelectionPolicy_MinAverage10Latencies:
-		rawLatency, hasLatency = dialer.mustGetCollection(a.CheckTyp).Latencies10.AvgLatency()
+		rawLatency, hasLatency = coll.Latencies10.AvgLatency()
 		minPolicy = true
 	case consts.DialerSelectionPolicy_MinMovingAverageLatencies:
-		rawLatency = dialer.mustGetCollection(a.CheckTyp).MovingAverage
+		rawLatency = coll.MovingAverage
 		hasLatency = rawLatency > 0
 		minPolicy = true
 	}
@@ -184,7 +185,7 @@ func (a *AliveDialerSet) NotifyLatencyChange(dialer *Dialer, alive bool) {
 		latency = rawLatency
 	}
 
-	if alive {
+	if coll.Alive {
 		index := a.dialerToIndex[dialer]
 		if index >= 0 {
 			// This dialer is already alive.
@@ -234,16 +235,16 @@ func (a *AliveDialerSet) NotifyLatencyChange(dialer *Dialer, alive bool) {
 		bakOldBestDialer := a.minLatency.dialer
 		// Calc minLatency.
 		a.dialerToLatency[dialer] = latency
-		if alive &&
+		if coll.Alive &&
 			latency <= a.minLatency.latency && // To avoid arithmetic overflow.
 			latency <= a.minLatency.latency-a.tolerance {
 			a.minLatency.latency = latency
 			a.minLatency.dialer = dialer
 		} else if a.minLatency.dialer == dialer {
 			a.minLatency.latency = latency
-			if !alive || latency > a.minLatency.latency {
+			if !coll.Alive || latency > a.minLatency.latency {
 				// Latency increases.
-				if !alive {
+				if !coll.Alive {
 					a.minLatency.dialer = nil
 				}
 				a.calcMinLatency()
@@ -282,16 +283,14 @@ func (a *AliveDialerSet) NotifyLatencyChange(dialer *Dialer, alive bool) {
 				}).Infof("Group has no dialer alive")
 			}
 		}
-	} else {
-		if alive && minPolicy && a.minLatency.dialer == nil {
-			// Use first dialer if no dialer has alive state (usually happen at the very beginning).
-			a.minLatency.dialer = dialer
-			a.log.WithFields(logrus.Fields{
-				"group":   a.dialerGroupName,
-				"network": a.CheckTyp.String(),
-				"dialer":  a.minLatency.dialer.property.Name,
-			}).Infof("Group selects dialer")
-		}
+	} else if coll.Alive && minPolicy && a.minLatency.dialer == nil {
+		// Use first dialer if no dialer has alive state (usually happen at the very beginning).
+		a.minLatency.dialer = dialer
+		a.log.WithFields(logrus.Fields{
+			"group":   a.dialerGroupName,
+			"network": a.CheckTyp.String(),
+			"dialer":  a.minLatency.dialer.property.Name,
+		}).Infof("Group selects dialer")
 	}
 }
 
